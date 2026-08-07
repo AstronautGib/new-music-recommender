@@ -6,7 +6,7 @@ Query music.db for track recommendations based on genre, mood, or a seed artist.
 Usage:
     python recommend.py --genre "r&b"
     python recommend.py --mood energetic
-    python recommend.py --artist "Some Artist"
+    python recommend.py --artist "Artist"
 """
 
 import argparse
@@ -34,26 +34,40 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def recommend_by_genre(conn: sqlite3.Connection, genre: str, limit: int = 15) -> list[sqlite3.Row]:
+def recommend_by_genre(
+    conn: sqlite3.Connection, genre: str, limit: int = 15, max_popularity: int = 60
+) -> list[sqlite3.Row]:
+    # A track can be tagged under multiple subgenres of the same genre
+    # (e.g. two different r&b subgenres), so group by track to avoid
+    # duplicate rows for the same track.
+    #
+    # max_popularity caps how mainstream results can be -- without this,
+    # results skew toward songs you've almost certainly already heard.
+    # Within that capped range we still sort by popularity DESC so you get
+    # the "best of the lesser-known" rather than pure obscurity/noise.
     query = """
-        SELECT DISTINCT t.track_name, a.artist_name, t.popularity, g.genre_name, g.subgenre_name
+        SELECT t.track_id, t.track_name, a.artist_name, t.popularity
         FROM tracks t
         JOIN artists a ON t.artist_id = a.artist_id
         JOIN track_genres tg ON t.track_id = tg.track_id
         JOIN genres g ON tg.genre_id = g.genre_id
         WHERE LOWER(g.genre_name) = LOWER(?)
+          AND t.popularity <= ?
+        GROUP BY t.track_id
         ORDER BY t.popularity DESC
         LIMIT ?
     """
-    return conn.execute(query, (genre, limit)).fetchall()
+    return conn.execute(query, (genre, max_popularity, limit)).fetchall()
+ 
 
-
-def recommend_by_mood(conn: sqlite3.Connection, mood: str, limit: int = 15) -> list[sqlite3.Row]:
+def recommend_by_mood(
+    conn: sqlite3.Connection, mood: str, limit: int = 15, max_popularity: int = 60
+) -> list[sqlite3.Row]:
     mood = mood.lower()
     if mood not in MOOD_PROFILES:
         valid = ", ".join(MOOD_PROFILES.keys())
         raise SystemExit(f"Unknown mood '{mood}'. Try one of: {valid}")
-
+ 
     condition = MOOD_PROFILES[mood]
     query = f"""
         SELECT DISTINCT t.track_name, a.artist_name, t.popularity,
@@ -61,17 +75,20 @@ def recommend_by_mood(conn: sqlite3.Connection, mood: str, limit: int = 15) -> l
         FROM tracks t
         JOIN artists a ON t.artist_id = a.artist_id
         WHERE {condition}
+          AND t.popularity <= ?
         ORDER BY t.popularity DESC
         LIMIT ?
     """
-    return conn.execute(query, (limit,)).fetchall()
+    return conn.execute(query, (max_popularity, limit)).fetchall()
+ 
 
-
-def recommend_by_artist(conn: sqlite3.Connection, artist_name: str, limit: int = 15) -> list[sqlite3.Row]:
+def recommend_by_artist(
+    conn: sqlite3.Connection, artist_name: str, limit: int = 15, max_popularity: int = 60
+) -> list[sqlite3.Row]:
     # Strategy: find genres the seed artist's tracks belong to, then find
     # other artists who show up in those same genres, ranked by popularity.
     query = """
-        SELECT DISTINCT t.track_name, a.artist_name, t.popularity
+        SELECT t.track_id, t.track_name, a.artist_name, t.popularity
         FROM tracks t
         JOIN artists a ON t.artist_id = a.artist_id
         JOIN track_genres tg ON t.track_id = tg.track_id
@@ -83,11 +100,13 @@ def recommend_by_artist(conn: sqlite3.Connection, artist_name: str, limit: int =
             WHERE LOWER(a2.artist_name) = LOWER(?)
         )
         AND LOWER(a.artist_name) != LOWER(?)
+        AND t.popularity <= ?
+        GROUP BY t.track_id
         ORDER BY t.popularity DESC
         LIMIT ?
     """
-    return conn.execute(query, (artist_name, artist_name, limit)).fetchall()
-
+    return conn.execute(query, (artist_name, artist_name, max_popularity, limit)).fetchall()
+  
 
 def print_results(rows: list[sqlite3.Row]) -> None:
     if not rows:
@@ -99,8 +118,8 @@ def print_results(rows: list[sqlite3.Row]) -> None:
         if "popularity" in keys and row["popularity"] is not None:
             line += f" (popularity: {row['popularity']})"
         print(line)
-
-
+ 
+ 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Get music recommendations by genre, mood, or artist.")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -108,20 +127,26 @@ def main() -> None:
     group.add_argument("--mood", help=f"one of: {', '.join(MOOD_PROFILES.keys())}")
     group.add_argument("--artist", help="a seed artist to find similar artists from")
     parser.add_argument("--limit", type=int, default=15, help="number of results to return")
+    parser.add_argument(
+        "--max-popularity",
+        type=int,
+        default=60,
+        help="only surface tracks at or below this popularity score (0-100). "
+             "Lower = more obscure/discovery-focused. Default 60.",
+    )
     args = parser.parse_args()
-
+ 
     conn = connect()
     try:
         if args.genre:
-            rows = recommend_by_genre(conn, args.genre, args.limit)
+            rows = recommend_by_genre(conn, args.genre, args.limit, args.max_popularity)
         elif args.mood:
-            rows = recommend_by_mood(conn, args.mood, args.limit)
+            rows = recommend_by_mood(conn, args.mood, args.limit, args.max_popularity)
         else:
-            rows = recommend_by_artist(conn, args.artist, args.limit)
+            rows = recommend_by_artist(conn, args.artist, args.limit, args.max_popularity)
         print_results(rows)
     finally:
         conn.close()
-
-
+ 
 if __name__ == "__main__":
     main()
