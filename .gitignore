@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Adding these manually for kaggle dataset
+data/*.csv
+*.db
+*.sqlite
+.env
